@@ -1,4 +1,6 @@
 # src/app.py
+from dotenv import load_dotenv
+load_dotenv() 
 import os
 import streamlit as st
 from analyzer import analyze_url, summarize_results
@@ -34,6 +36,10 @@ if st.button("Analisar"):
             "VIRUSTOTAL_KEY": os.getenv("VIRUSTOTAL_KEY"),
             "SAFE_BROWSING_KEY": os.getenv("SAFE_BROWSING_KEY")
         }
+        sb_key = os.getenv("SAFE_BROWSING_KEY")
+        vt_key = os.getenv("VIRUSTOTAL_KEY")
+        st.info(f"VIRUSTOTAL_KEY presente? {'sim' if vt_key else 'não'}")
+        st.info(f"SAFE_BROWSING_KEY presente? {'sim' if sb_key else 'não'}")
         st.info("Executando verificações... (pode levar alguns segundos)")
         results = analyze_url(url, config=config)
         st.subheader("Resumo")

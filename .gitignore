@@ -1,0 +1,14 @@
+# Ignorar variáveis de ambiente e arquivos locais
+.env
+phish_history.db
+
+# Cache e temporários do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Configurações de editor
+.vscode/
+.idea/
