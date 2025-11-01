@@ -161,28 +161,145 @@ if run:
                 st.write(sslv)
 
         # Feeds e APIs
-        with st.expander("Feeds e APIs"):
-            def show_source(name, data):
-                st.subheader(name)
-                if isinstance(data, dict):
-                    status = data.get("status")
-                    if status == "found":
-                        st.error(f"{name}: encontrado!")
-                    elif status == "not_found":
-                        st.success(f"{name}: não encontrado.")
-                    elif status == "skipped":
-                        st.info(f"{name}: verificação não realizada (sem chave).")
-                    elif status == "error":
-                        st.warning(f"{name}: erro — {data.get('message')}")
-                    else:
-                        st.write(data)
-                else:
-                    st.write(data)
+        with st.expander("Feeds e APIs — Detalhes e interpretação"):
+            def explain_found(source_name):
+                st.error(f"{source_name}: encontrado!")
+                if source_name == "OpenPhish":
+                    st.markdown("**O que isso significa:** Esta URL foi reportada publicamente como phishing pelo OpenPhish — alto grau de confiança.")
+                    st.markdown("**Ação recomendada:** Não acesse a URL em navegadores comuns; marque como phishing e denuncie se necessário.")
+                elif source_name == "URLhaus":
+                    st.markdown("**O que isso significa:** URLhaus mantém um feed de URLs maliciosas (malware/phishing). Encontrado indica registro público recente.")
+                    st.markdown("**Ação recomendada:** Trate como malicioso; evite interação e remova e-mails/links que apontem para ela.")
+                elif source_name == "VirusTotal":
+                    st.markdown("**O que isso significa:** Diversos mecanismos de segurança analisaram essa URL/artefato. Deteções indicam risco.")
+                    st.markdown("**Ação recomendada:** confirmar com múltiplas fontes e evitar clicar; agregue evidências antes de ação corretiva.")
+                elif source_name == "Google Safe Browsing":
+                    st.markdown("**O que isso significa:** O Google identificou esta URL como um vetor de engenharia social (phishing) ou software indesejado.")
+                    st.markdown("**Ação recomendada:** bloquear, não visitar, e avisar usuários que receberam o link.")
 
-            show_source("OpenPhish", results.get("openphish"))
-            show_source("URLhaus", results.get("urlhaus"))
-            show_source("VirusTotal", results.get("virustotal"))
-            show_source("Google Safe Browsing", results.get("safe_browsing"))
+            def explain_not_found(source_name):
+                st.success(f"{source_name}: não encontrado.")
+                st.markdown("**O que isso significa:** A fonte pesquisada não tem registro conhecido dessa URL. Isso **não garante** que a URL é segura — apenas que não há registro nessa base.")
+                st.markdown("**Ação recomendada:** combine com heurísticas e outras fontes; se heurísticas forem suspeitas, trate com cautela.")
+
+            def explain_skipped(source_name):
+                st.info(f"{source_name}: verificação pulada (chave não configurada).")
+                st.markdown("**O que isso significa:** A checagem não foi realizada — configure a chave/API para obter verificação adicional.")
+                st.markdown("**Como configurar:** ver README → `.env` → variáveis `SAFE_BROWSING_KEY`, `VIRUSTOTAL_KEY`.")
+
+            def explain_error(source_name, message):
+                st.warning(f"{source_name}: erro — {message}")
+                st.markdown("**O que isso significa:** houve um problema técnico consultando a fonte. Isso pode ser temporário.")
+                st.markdown("**Ação recomendada:** tente novamente mais tarde ou verifique sua conexão / quotas / formato da URL.")
+
+            # ---- OpenPhish ----
+            op = results.get("openphish")
+            st.subheader("OpenPhish")
+            if isinstance(op, dict):
+                s = op.get("status")
+                if s == "found":
+                    explain_found("OpenPhish")
+                    st.markdown("> Fonte: OpenPhish feed público")
+                elif s == "not_found":
+                    explain_not_found("OpenPhish")
+                elif s == "error":
+                    explain_error("OpenPhish", op.get("message"))
+                else:
+                    st.write(op)
+            else:
+                st.write(op)
+
+            st.markdown("---")
+
+            # ---- URLhaus ----
+            uh = results.get("urlhaus")
+            st.subheader("URLhaus")
+            if isinstance(uh, dict):
+                s = uh.get("status")
+                if s == "found":
+                    explain_found("URLhaus")
+                    matches = uh.get("matches", [])
+                    st.markdown("**Ocorrências (exemplo):**")
+                    for m in matches:
+                        st.text(m)
+                    st.markdown("> Nota: usamos o feed CSV público do URLhaus para esta verificação.")
+                elif s == "not_found":
+                    explain_not_found("URLhaus")
+                elif s == "error":
+                    explain_error("URLhaus", uh.get("message"))
+                else:
+                    st.write(uh)
+            else:
+                st.write(uh)
+
+            st.markdown("---")
+
+            # ---- VirusTotal ----
+            vt = results.get("virustotal")
+            st.subheader("VirusTotal")
+            if isinstance(vt, dict):
+                s = vt.get("status")
+                if s == "found":
+                    explain_found("VirusTotal")
+                    positives = vt.get("positives", 0)
+                    st.markdown(f"- **Detecções totais (positives):** {positives}")
+                    stats = vt.get("last_analysis_stats", {})
+                    if isinstance(stats, dict):
+                        st.markdown("**Resumo por categoria:**")
+                        st.table(pd.DataFrame(list(stats.items()), columns=["Categoria","Contagem"]))
+                    else:
+                        st.write(stats)
+                    st.markdown("> Observação: a contagem é a soma de engines que marcaram a URL; verifique `Dados brutos (JSON)` para detalhes por engine.")
+                elif s == "not_found":
+                    explain_not_found("VirusTotal")
+                elif s == "skipped":
+                    explain_skipped("VirusTotal")
+                elif s == "error":
+                    explain_error("VirusTotal", vt.get("message"))
+                else:
+                    st.write(vt)
+            else:
+                st.write(vt)
+
+            st.markdown("---")
+
+            # ---- Google Safe Browsing ----
+            sb = results.get("safe_browsing")
+            st.subheader("Google Safe Browsing")
+            if isinstance(sb, dict):
+                s = sb.get("status")
+                if s == "found":
+                    explain_found("Google Safe Browsing")
+                    st.markdown(f"- **Quantidade de matches:** {sb.get('quantidade')}")
+                    st.markdown("**Detalhes das correspondências:**")
+                    for d in sb.get("detalhes", sb.get("threat_types", [])):
+                        # d pode ser string ou dict dependendo da função; tratamos dict
+                        if isinstance(d, dict):
+                            st.write(f"- Tipo de ameaça: **{d.get('tipo_ameaça')}**")
+                            st.write(f"  - Plataforma: {d.get('plataforma')}")
+                            st.write(f"  - Cache duration: {d.get('cache_duracao')}")
+                            st.write("---")
+                        else:
+                            st.write(f"- {d}")
+                    st.markdown("Observação: `SOCIAL_ENGINEERING` indica classificação típica de phishing (eng. social).")
+                elif s == "not_found":
+                    explain_not_found("Google Safe Browsing")
+                elif s == "skipped":
+                    explain_skipped("Google Safe Browsing")
+                elif s == "error":
+                    explain_error("Google Safe Browsing", sb.get("message"))
+                else:
+                    st.write(sb)
+            else:
+                st.write(sb)
+
+            st.markdown("---")
+            st.markdown("**Guia rápido de interpretação:**")
+            st.markdown("- **Encontrado** em qualquer feed/API → trate como malicioso até prova em contrário. Evite abrir o link.")
+            st.markdown("- **Não encontrado** → pode ser legítimo ou novo; combine com heurísticas (idade do domínio, formulários de login, similaridade de marca).")
+            st.markdown("- **Pulou verificação** → configure as chaves em `.env` para habilitar mais checagens.")
+            st.markdown("- **Erro técnico** → pode ser temporário; tente novamente ou consulte o `Dados brutos (JSON)` para depuração.")
+
 
         with st.expander("Dados brutos (JSON)"):
             st.json(results)
