@@ -83,18 +83,149 @@ if run:
             for r in reasons:
                 st.markdown(f"- {r}")
 
-        # --- MÉTRICAS CHAVE ---
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Tamanho da URL", results.get("url_length", "—"))
-        who_age = results.get("whois", {}).get("age_days", "—")
-        m2.metric("Idade do domínio (dias)", who_age if who_age is not None else "—")
+
+        # Top metrics (visuais semelhantes ao Score)
+        col_a, col_b, col_c = st.columns([1,1,1])
+        col_a.metric("Tamanho da URL", f"{results.get('url_length', '—')}")
+        who_age = results.get("whois", {}).get("age_days")
+        col_b.metric("Idade do domínio (dias)", who_age if who_age is not None else "—")
         ssl_status = results.get("ssl", {}).get("status", results.get("ssl", {}).get("valid", "—"))
-        m3.metric("Status SSL", ssl_status)
+        col_c.metric("Status SSL", ssl_status)
+
+        st.write("")  # espaçamento
+
+        # Cards para checks — 2 colunas responsivas (ajusta conforme largura)
+        card_cols = st.columns(2)
+
+        def render_card(col, title, text, tone="info"):
+            """
+            tone: one of 'success','warning','error','info'
+            """
+            colors = {
+                "success": "#1f7a3a",
+                "warning": "#b7791f",
+                "error": "#8b2d2d",
+                "info": "#234e6b"
+            }
+            bg = colors.get(tone, "#234e6b")
+            html = f"""
+            <div style="
+                background:{bg};
+                padding:12px 16px;
+                border-radius:10px;
+                color: #ffffff;
+                box-shadow: rgba(0,0,0,0.15) 0px 4px 8px;
+                margin-bottom:8px;
+            ">
+            <div style="font-size:14px; opacity:0.95; margin-bottom:6px;"><strong>{title}</strong></div>
+            <div style="font-size:13px; opacity:0.95;">{text}</div>
+            </div>
+            """
+            col.markdown(html, unsafe_allow_html=True)
+
+        # Primeiro par de cartões
+        c1, c2 = card_cols
+        # DNS dinâmico
+        dyn = results.get("dynamic_dns", {})
+        if dyn.get("dynamic"):
+            render_card(c1, "DNS dinâmico detectado", f"Provedor: {dyn.get('provider')}. Domínios dinâmicos são frequentemente usados para evasão.", "warning")
+        else:
+            render_card(c1, "DNS dinâmico", "Não detectado.", "info")
+
+        # Similaridade Levenshtein
+        sim = results.get("brand_similarity_lev", {})
+        ratio = sim.get("ratio", 0.0)
+        brand = sim.get("brand") or "—"
+        dist = sim.get("distance") if sim.get("distance") is not None else "—"
+        if ratio > 0.75:
+            render_card(c2, "Alta similaridade com marca", f"Marca: {brand} (ratio={ratio:.2f}, dist={dist}). Possível domínio clonador.", "error")
+        elif ratio > 0.45:
+            render_card(c2, "Similaridade moderada", f"Marca mais parecida: {brand} (ratio={ratio:.2f}).", "warning")
+        else:
+            render_card(c2, "Similaridade com marca", f"Sem similaridade de alto risco (melhor match: {brand}, ratio={ratio:.2f}).", "success")
+
+        # Segundo par de cartões
+        c3, c4 = st.columns(2)
+        # SSL match
+        ssl_match = results.get("ssl_matches_domain", None)
+        if ssl_match is True:
+            render_card(c3, "Certificado SSL", "Certificado corresponde ao domínio (CN/SAN).", "success")
+        elif ssl_match is False:
+            render_card(c3, "Certificado SSL", "NÃO corresponde ao domínio — comportamento suspeito.", "error")
+        else:
+            render_card(c3, "Certificado SSL", "Verificação não disponível.", "info")
+
+        # Redirects
+        rds = results.get("redirects_suspicious", {})
+        if rds.get("suspicious"):
+            reasons = ", ".join(rds.get("reasons", [])) or "suspeito"
+            chain = " → ".join(rds.get("chain_domains", [])[:6])
+            render_card(c4, "Redirects suspeitos", f"{reasons}. Cadeia: {chain}", "warning")
+        else:
+            render_card(c4, "Redirects", "Sem redirects suspeitos detectados.", "success")
+
+        # Terceiro par de cartões
+        c5, c6 = st.columns(2)
+        # Conteúdo sensível
+        cs = results.get("content_sensitive", {})
+        if cs.get("has_sensitive"):
+            terms = ", ".join(cs.get("sensitive_terms", [])[:8])
+            render_card(c5, "Conteúdo sensível", f"Termos detectados: {terms}. Verifique formulários que solicitam dados.", "warning")
+        else:
+            render_card(c5, "Conteúdo sensível", "Nenhum termo sensível detectado no conteúdo.", "success")
+
+        # Dynamic info: show chain domains if present (small card)
+        chain_info = ""
+        if isinstance(rds, dict) and rds.get("chain_domains"):
+            chain_info = " → ".join(rds.get("chain_domains", [])[:8])
+        if chain_info:
+            render_card(c6, "Cadeia de redirects (amostragem)", chain_info, "info")
+        else:
+            render_card(c6, "Cadeia de redirects (amostragem)", "Nenhuma cadeia encontrada.", "info")
+
+
+
 
         st.write("---")
 
         # --- DETALHES ---
         st.markdown("### 🔎 Detalhes das verificações")
+
+        st.markdown("## 📊 Histórico e Estatísticas")
+
+        db_path = "phish_history.db"
+        if os.path.exists(db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                df_hist = pd.read_sql_query(
+                    "SELECT id, url, timestamp, score FROM history ORDER BY timestamp DESC LIMIT 500",
+                    conn
+                )
+                st.markdown("### Últimas análises realizadas")
+                st.dataframe(df_hist, use_container_width=True, hide_index=True)
+
+                # Exportar histórico completo
+                csv_hist = df_hist.to_csv(index=False).encode("utf-8")
+                st.download_button("📥 Baixar histórico completo (CSV)", csv_hist, "history.csv", "text/csv")
+
+                # Gráfico de distribuição de scores
+                st.markdown("### Distribuição de Scores")
+                chart = df_hist["score"].value_counts().sort_index()
+                st.bar_chart(chart)
+
+                # Gráfico dos últimos 10 resultados
+                st.markdown("### Últimas 10 URLs analisadas (Score)")
+                if not df_hist.empty:
+                    st.bar_chart(df_hist.head(10).set_index("url")["score"])
+                else:
+                    st.info("Ainda não há dados suficientes para gerar gráficos.")
+
+                conn.close()
+            except Exception as e:
+                st.error(f"Erro ao carregar histórico: {e}")
+        else:
+            st.info("Nenhuma análise registrada ainda. Execute uma verificação para começar a gerar histórico.")
 
         # Heurísticas
         with st.expander("Heurísticas (URL) — interpretação detalhada"):
@@ -305,13 +436,13 @@ if run:
             st.json(results)
 
         # Exportar CSV
-        flat = {
-            "url": url,
-            "veredito": verdict["veredito"],
-            "score": verdict["score_text"],
-            "reasons": "; ".join(results.get("risk", {}).get("reasons", [])),
-            "whois_age_days": results.get("whois", {}).get("age_days"),
-            "ssl_status": results.get("ssl", {}).get("status")
-        }
-        csv = pd.DataFrame([flat]).to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Baixar relatório (CSV)", csv, "phish_report.csv", "text/csv")
+        # flat = {
+        #     "url": url,
+        #     "veredito": verdict["veredito"],
+        #     "score": verdict["score_text"],
+        #     "reasons": "; ".join(results.get("risk", {}).get("reasons", [])),
+        #     "whois_age_days": results.get("whois", {}).get("age_days"),
+        #     "ssl_status": results.get("ssl", {}).get("status")
+        # }
+        # csv = pd.DataFrame([flat]).to_csv(index=False).encode("utf-8")
+        # st.download_button("📥 Baixar relatório (CSV)", csv, "phish_report.csv", "text/csv")
