@@ -84,53 +84,78 @@ def heuristic_checks(url, domain):
     return out
 
 def whois_check(domain):
+    import datetime
     try:
         w = whois.whois(domain)
         creation = w.creation_date
         if isinstance(creation, list):
             creation = creation[0]
         if creation:
-            age_days = (datetime.datetime.now() - creation).days
+            # remove timezone para evitar erro offset-naive/aware
+            creation_naive = creation.replace(tzinfo=None) if hasattr(creation, "tzinfo") else creation
+            now_naive = datetime.datetime.now()
+            age_days = (now_naive - creation_naive).days
+            creation_str = creation_naive.strftime("%Y-%m-%d %H:%M:%S")
         else:
             age_days = None
-        return {"domain": domain, "creation_date": str(creation), "age_days": age_days}
+            creation_str = None
+        return {"status": "ok", "domain": domain, "creation_date": creation_str, "age_days": age_days}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}
+
 
 def ssl_check(domain):
     if not domain:
-        return {"error": "domain empty"}
+        return {"status": "error", "message": "domain empty"}
     try:
         context = ssl.create_default_context()
-        with socket.create_connection((domain, 443), timeout=5) as sock:
+        with socket.create_connection((domain, 443), timeout=6) as sock:
             with context.wrap_socket(sock, server_hostname=domain) as ssock:
                 cert = ssock.getpeercert()
-                not_after = cert.get("notAfter", None)
-                issuer = cert.get("issuer", ())
-                subject = cert.get("subject", ())
-                return {"valid": True, "not_after": not_after, "issuer": issuer, "subject": subject}
+                return {
+                    "status": "valid",
+                    "not_after": cert.get("notAfter"),
+                    "issuer": cert.get("issuer"),
+                    "subject": cert.get("subject")
+                }
+    except (ssl.SSLError, socket.timeout) as e:
+        return {"status": "invalid", "message": f"SSL timeout/erro: {e}"}
+    except ConnectionResetError:
+        return {"status": "invalid", "message": "Conexão encerrada pelo host remoto"}
     except Exception as e:
-        return {"valid": False, "error": str(e)}
+        return {"status": "invalid", "message": str(e)}
+
+
 
 def redirect_check(url):
     try:
-        r = requests.get(url, allow_redirects=True, timeout=6, headers={"User-Agent":"phish-detector/1.0"})
+        r = requests.get(url, allow_redirects=True, timeout=6, headers={"User-Agent": "phish-detector/1.0"})
         chain = [resp.url for resp in r.history] + [r.url]
-        return {"final_url": r.url, "status_code": r.status_code, "redirect_chain": chain}
-    except Exception as e:
-        return {"error": str(e)}
+        return {"status": "ok", "final_url": r.url, "status_code": r.status_code, "redirect_chain": chain}
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "message": f"Falha na requisição: {e}"}
+    except ConnectionResetError:
+        return {"status": "error", "message": "Conexão encerrada pelo host remoto"}
 
 def content_check(url):
     try:
-        r = requests.get(url, timeout=6, headers={"User-Agent":"phish-detector/1.0"})
+        r = requests.get(url, timeout=6, headers={"User-Agent": "phish-detector/1.0"})
         text = r.text.lower()
         has_login_form = ("type=\"password\"" in text) or ("input name=\"password\"" in text)
         has_forms = "<form" in text
-        # naive logo-like detection
         logo_like = any(k in text for k in ["paypal", "login", "bank", "account", "apple", "google"])
-        return {"status_code": r.status_code, "has_forms": has_forms, "has_login_form": has_login_form, "logo_like": logo_like}
-    except Exception as e:
-        return {"error": str(e)}
+        return {
+            "status": "ok",
+            "status_code": r.status_code,
+            "has_forms": has_forms,
+            "has_login_form": has_login_form,
+            "logo_like": logo_like
+        }
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "message": f"Falha ao obter conteúdo: {e}"}
+    except ConnectionResetError:
+        return {"status": "error", "message": "Conexão encerrada pelo host remoto"}
+
 
 def brand_similarity(domain):
     best = {"brand": None, "ratio": 0.0}
@@ -143,71 +168,108 @@ def brand_similarity(domain):
 
 # ------------ External feeds / APIs -------------
 def check_openphish(domain_or_url, feed_path):
+    """Retorna friendly output: found True/False e a linha correspondente se encontrada."""
     if not os.path.exists(feed_path):
-        return {"error": f"feed not found at {feed_path}"}
+        return {"status": "error", "message": f"feed not found at {feed_path}"}
     try:
         with open(feed_path, "r", encoding="utf-8") as f:
             data = f.read().splitlines()
         for line in data:
             if domain_or_url in line or line in domain_or_url:
-                return {"found": True, "line": line}
-        return {"found": False}
+                return {"status": "found", "source": "OpenPhish", "line": line}
+        return {"status": "not_found", "source": "OpenPhish"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}
 
 def check_urlhaus(url):
+    """
+    Verifica se a URL aparece no feed público do URLhaus.
+    Não requer API key nem autenticação.
+    """
     try:
-        resp = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data={"url": url}, timeout=10)
+        feed_url = "https://urlhaus.abuse.ch/downloads/csv_recent/"
+        resp = requests.get(feed_url, headers={"User-Agent": "phish-detector/1.0"}, timeout=10)
         if resp.status_code != 200:
-            return {"error": f"status {resp.status_code}", "text": resp.text}
-        return resp.json()
+            return {"status": "error", "message": f"Erro HTTP {resp.status_code} ao baixar feed."}
+        
+        # o feed é CSV, cada linha contém a URL (geralmente na 2ª coluna)
+        lines = resp.text.splitlines()
+        matches = [line for line in lines if url.replace("https://", "").replace("http://", "") in line]
+        if matches:
+            return {"status": "found", "source": "URLhaus", "matches": matches[:3]}  # mostra até 3 ocorrências
+        else:
+            return {"status": "not_found", "source": "URLhaus"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}
+
+
 
 def vt_url_id_from_url(url):
     b = base64.urlsafe_b64encode(url.encode()).rstrip(b"=").decode()
     return b
 
 def check_virustotal(url, api_key):
+    """Consulta VirusTotal e resume last_analysis_stats em um dict legível."""
     if not api_key:
-        return {"error": "no api key provided"}
+        return {"status": "skipped", "message": "no api key provided"}
     try:
         headers = {"x-apikey": api_key}
         url_id = vt_url_id_from_url(url)
         r = requests.get(f"{VT_BASE}/urls/{url_id}", headers=headers, timeout=10)
         if r.status_code == 200:
             j = r.json()
-            # provide condensed useful fields
             stats = j.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-            return {"found": True, "last_analysis_stats": stats}
+            # transformar em total de detecções
+            positives = sum(v for v in stats.values()) if isinstance(stats, dict) else 0
+            return {"status": "found", "source": "VirusTotal", "positives": positives, "last_analysis_stats": stats}
         else:
-            return {"found": False, "status": r.status_code, "text": r.text}
+            # 404 ou outro
+            return {"status": "not_found", "source": "VirusTotal", "status_code": r.status_code, "text": r.text}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}
 
 def check_safe_browsing(url, api_key):
+    """Consulta o Google Safe Browsing e detalha o tipo de ameaça detectada."""
     if not api_key:
-        return {"error": "no api key provided"}
+        return {"status": "skipped", "message": "no api key provided"}
     try:
         endpoint = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={api_key}"
         body = {
-          "client": {"clientId": "phish-detector", "clientVersion": "1.0"},
-          "threatInfo": {
-            "threatTypes": ["MALWARE","SOCIAL_ENGINEERING","UNWANTED_SOFTWARE","POTENTIALLY_HARMFUL_APPLICATION"],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}]
-          }
+            "client": {"clientId": "phish-detector", "clientVersion": "1.0"},
+            "threatInfo": {
+                "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": url}]
+            }
         }
         r = requests.post(endpoint, json=body, timeout=10)
         if r.status_code == 200:
             j = r.json()
-            return {"matches": j.get("matches", [])}
+            matches = j.get("matches", [])
+            if matches:
+                threats = []
+                for m in matches:
+                    threats.append({
+                        "tipo_ameaça": m.get("threatType"),
+                        "plataforma": m.get("platformType"),
+                        "entrada": m.get("threat", {}).get("url"),
+                        "cache_duracao": m.get("cacheDuration")
+                    })
+                return {
+                    "status": "found",
+                    "source": "Google Safe Browsing",
+                    "quantidade": len(threats),
+                    "detalhes": threats
+                }
+            else:
+                return {"status": "not_found", "source": "Google Safe Browsing"}
         else:
-            return {"error": f"status {r.status_code} - {r.text}"}
+            return {"status": "error", "message": f"HTTP {r.status_code}: {r.text}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}
 
+    
 # ------------ Scoring & history -------------
 def compute_score(results):
     score = 0
